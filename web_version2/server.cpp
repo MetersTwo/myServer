@@ -54,9 +54,9 @@ int Server::epollRun(){
     }
     struct epoll_event evs[1024];
     while(1){
-        int size = sizeof(evs) / sizeof(struct epoll_event);
+        // int size = sizeof(evs) / sizeof(struct epoll_event);
         int timeout = timer.getNextTime();
-        int num = epoll_wait(epfd, evs, size, timeout);
+        int num = epoll_wait(epfd, evs, 1000, timeout);
         for(int i = 0; i < num; ++i){
             int fd = evs[i].data.fd;
             if(fd == lfd){
@@ -66,9 +66,12 @@ int Server::epollRun(){
                 // deal read
                 // recvHttpRequest(fd, epfd);
                 clients[fd].onRead(epfd);
+                clients.erase(fd);
+                epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                close(fd);
             }
         }
-        timer.tick();
+        // timer.tick();
     }
     return 1;
 }
@@ -80,6 +83,7 @@ int Server::acceptClient(){
         perror("accept");
         return -1;
     }
+    printf("[accept]: %d\n", cfd);
     // set noneblock
     int flag = fcntl(cfd, F_GETFL);
     flag |= O_NONBLOCK;
@@ -95,12 +99,14 @@ int Server::acceptClient(){
     }
     clients[cfd] = Client(cfd);
     timer.push(Clock::now(), bind(&Server::closefd, this, cfd), epfd, cfd);
-    return 1;
+    return 0;
 }
 
 void Server::run(){
     // 切换服务器的工作目录
-    chdir("/home/lin/web");
+    // chdir("/home/lin/web");
+    chdir("/home/lin/web/resources/images/");
+
     //初始化监听套接字
     lfd = initListenFd();
     // 启动服务
@@ -125,25 +131,30 @@ void Server::closefd(int cfd){
 int Client::recvHttpRequest(int epfd){
     int len = 0;
     int total = 0;
-    char buf[4096] = {0};
+    // char buf[4096] = {0};
+    
     char tmp[1024] = {0};
     while((len = recv(cfd, tmp, sizeof tmp, 0)) > 0){
-        if(total + len >= sizeof buf){
-            return -1;
-        }
-        memcpy(buf + total, tmp, len);
-        total += len;
+        rbuf += string(tmp);
+        // memcpy(buf + total, tmp, len);
+        // total += len;
     }
+    printf("[%d] recv HTTP: {\n%s}\n", cfd, rbuf.c_str()); // log
     // recv finish ? 
     if(len == -1 && errno == EAGAIN){
         // parse request line
-        char *pt = strstr(buf, "\r\n");
-        int reqLen = pt - buf;
-        buf[reqLen] = '\0';
-        parseRequestLine(buf);
-    // }else if(len == 0){
-    //     epoll_ctl(epfd, EPOLL_CTL_DEL, cfd, NULL);
-    //     close(cfd);
+        // char *pt = strstr(rbuf.c_str(), "\r\n");
+        // int reqLen = pt - rbuf.c_str();
+        // buf[reqLen] = '\0';
+        int cut = rbuf.find("/r/n");
+        parseRequestLine(rbuf.substr(0, cut).c_str());
+
+
+    }else if(len == 0){
+        // epoll_ctl(epfd, EPOLL_CTL_DEL, cfd, NULL);
+        // close(cfd);
+        printf("client close!\n");
+        return 0;
     }else{
         perror("recv");
         return -1;
@@ -151,12 +162,13 @@ int Client::recvHttpRequest(int epfd){
     return 1;
 }
 
+
 int Client::parseRequestLine(const char* line){
     // get /xx/1.jpg
     char method[4];
     char path[1024];
     sscanf(line, "%[^ ] %[^ ]", method, path);
-    printf("method: %s path: %s\n", method, path); // log
+    printf(" [method]: %s\n [path]: %s\n", method, path); // log
     if(strcasecmp(method, "get") != 0){
         return -1;
     }
@@ -188,6 +200,8 @@ int Client::parseRequestLine(const char* line){
         sendFile(file);
     }
 
+    printf("\n}\n");    // log
+
     return 1;
 }
 
@@ -195,7 +209,7 @@ int Client::sendFile(const char *fileName){
     printf("sendfile: %s\n", fileName);
     int fd = open(fileName, O_RDONLY);
     assert(fd > 0);
-#if 0
+#if 1
     while(true){
         char buf[1024];
         int len = read(fd, buf, sizeof buf);
@@ -225,9 +239,11 @@ int Client::sendFile(const char *fileName){
 int Client::sendHeadMsg(int cfd, int status, const char* descr, const char* type, int length){
     char buf[4096] = {0};
     sprintf(buf, "http/1.1 %d %s\r\n", status, descr);
-    sprintf(buf + strlen(buf), "content-type: %s\r\n", type);
-    sprintf(buf + strlen(buf), "content-length: %d\r\n\r\n", length);
-    
+    sprintf(buf + strlen(buf), "Content-type: %s\r\n", type);
+    sprintf(buf + strlen(buf), "Content-length: %d\r\n", length);
+    sprintf(buf + strlen(buf), "Connection: keep-alive\r\n\r\n");
+
+    printf("[%d] respond HTTP: {\n%s", cfd, buf); // log
     send(cfd, buf, strlen(buf), 0);
     return 1;
 }
@@ -261,16 +277,15 @@ int Client::sendDir(const char *dirName){
 }
 
 std::unordered_map<std::string, std::string> Client::fileType = {
-    // {".html"  ,"text/html; charset=utf-8"   },
-    // {".htm"   ,"text/html; charset=utf-8"   },
-    // {".jpg"   ,"image/jpeg"                 },
-    // {".jpeg"  ,"image/jpeg"                 },
-    // {".gif"   ,"image/gif"                  },
-    // {".png"   ,"image/png"                  },
-    // {".css"   ,"text/css"                   },
-    // {".au"    ,"audio/basic"                },
-    {"default", "text/plain; charset=utf-8" },    
-    { ".html",  "text/html" },
+    {".html"  ,"text/html; charset=utf-8"   },
+    {".htm"   ,"text/html; charset=utf-8"   },
+    {".jpg"   ,"image/jpeg"                 },
+    {".jpeg"  ,"image/jpeg"                 },
+    {".gif"   ,"image/gif"                  },
+    {".png"   ,"image/png"                  },
+    {".css"   ,"text/css"                   },
+    {".au"    ,"audio/basic"                },
+    {"default", "text/plain; charset=utf-8" },
     { ".xml",   "text/xml" },
     { ".xhtml", "application/xhtml+xml" },
     { ".txt",   "text/plain" },
@@ -313,6 +328,7 @@ int Client::onRead(int epfd){
 ***************************************************************************************************
 */
 void Time_heap::swp(int a, int b){
+    if(a == b) return;
     swp(timeList[a], timeList[b]);
     return;
 }
@@ -388,13 +404,23 @@ int Time_heap::getNextTime(){
 }
 
 int Time_heap::tick(){
+    printf("before: tick(): ");
+    for(auto tmp : timeList){
+        printf("[%d] ", tmp.fd);
+    }
+    printf("\n");
     while(!timeList.empty()){
         int time = chrono::duration_cast<MS>(Clock::now() - timeList[0].t).count();
         // printf("%ld\n", time);
         if(time < timeout_ms){
-            return 0;
+            break;
         }
         pop();
     }
+    printf("after: tick(): ");
+    for(auto tmp : timeList){
+        printf("[%d] ", tmp.fd);
+    }
+    printf("\n");
     return 0;
 }

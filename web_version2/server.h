@@ -25,8 +25,13 @@ public:
     Client() = default;
     // 接收http请求
     int recvHttpRequest(int epfd);
+    // 解析HTTP请求
+    int parse(const char* line);
     // 解析请求行
     int parseRequestLine(const char* line);
+    // 解析请求头
+    // 解析请求体
+
     // 发送文件
     int sendFile(const char *fileName);
     // 发送(状态行+响应头)
@@ -40,6 +45,8 @@ public:
 private:
     int cfd;
     static std::unordered_map<std::string, std::string> fileType;
+    std::unordered_map<std::string, std::string> rqHead;
+    std::string rbuf;
 };
 
 typedef std::chrono::high_resolution_clock Clock;
@@ -92,7 +99,7 @@ private:
 
 class Server{
 public:
-    Server(int _port = 1316):port(_port),timer(60*1000){}
+    Server(int _port = 1316):port(_port),timer(10000){}
     // 初始化监听套接字
     int initListenFd(); 
     // 启动epoll
