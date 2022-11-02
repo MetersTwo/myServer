@@ -18,13 +18,17 @@
 #include <functional>
 #include <vector>
 #include <stdio.h>
+#include <time.h>
 
 class Client{
 public:
-    Client(int _cfd):cfd(_cfd){}
+    Client(int _cfd):cfd(_cfd),isClosed(false){}
     Client() = default;
+public:
+    // 初始化Client对象
+    void init(int epfd_, int cfd_);
     // 接收http请求
-    int recvHttpRequest(int epfd);
+    int recvHttpRequest();
     // 解析HTTP请求
     int parse(const char* line);
     // 解析请求行
@@ -41,65 +45,61 @@ public:
     // 发送目录
     int sendDir(const char *dirName);
     // 处理输入
-    int onRead(int epfd);
+    int onRead();
+    // 关闭
+    int C_close();
+
 private:
-    int cfd;
+    bool isClosed;
+    int cfd, epfd;
     static std::unordered_map<std::string, std::string> fileType;
     std::unordered_map<std::string, std::string> rqHead;
     std::string rbuf;
 };
 
-typedef std::chrono::high_resolution_clock Clock;
-typedef std::chrono::milliseconds MS;
+// typedef std::chrono::high_resolution_clock Clock;
+// typedef std::chrono::milliseconds MS;
 
 struct TimeNode{
-    std::chrono::time_point<std::chrono::high_resolution_clock> t;
+    // std::chrono::time_point<std::chrono::high_resolution_clock> t;
+    time_t expire;
     std::function<void()> cb_func;
-    int epfd;
     int fd;
-    bool operator<(const TimeNode &b){
-        return t < b.t;
-    }
-    bool operator>(const TimeNode &b){
-        return t > b.t;
+    bool operator<(const TimeNode& tn){
+        return this->expire < tn.expire;
     }
     TimeNode(){}
-    TimeNode(
-    std::chrono::time_point<std::chrono::high_resolution_clock> t,
-    std::function<void()> func,
-    int epfd,
-    int fd):
-    t(t),
-    cb_func(func),
-    epfd(epfd),
-    fd(fd){}
+    TimeNode(time_t exptime,std::function<void()> func, int fd):expire(exptime), cb_func(func), fd(fd){}
 };
 
 class Time_heap{
 public:
-    Time_heap(int timeOut = 60000):timeout_ms(timeOut){}
+    Time_heap(int timeOut = 5):timeout_ms(timeOut){
+        timeList.reserve(10);
+    }
     Time_heap() = default;
-    void swp(int a, int b);
-    void swp(TimeNode& a, TimeNode& b);
-    int dwnAdj(int idx);
-    int upAdj(int idx);
-    int push(std::chrono::time_point<std::chrono::high_resolution_clock> y,
-    std::function<void()>,
-    int epfd,
-    int fd);
+public:
+    int push(time_t exp_time,std::function<void()> func,int fd);
     int push(TimeNode tn);
+
     int pop();
     int getNextTime();
     int tick();
     inline bool empty(){return timeList.empty();}
+    void test_show_arr(const std::string str);
+
 private:
+    void swp(int a, int b);
+    void swp(TimeNode& a, TimeNode& b);
+    int dwnAdj(int idx);
+    int upAdj(int idx);
     std::vector<TimeNode> timeList; 
     int timeout_ms;
 };
 
 class Server{
 public:
-    Server(int _port = 1316):port(_port),timer(10000){}
+    Server(int _port = 1316):port(_port), timer(5){}
     // 初始化监听套接字
     int initListenFd(); 
     // 启动epoll
@@ -109,7 +109,9 @@ public:
     // 开始工作
     void run();
     // 关闭连接
-    void closefd(int cfd);
+    void S_close(int cfd);
+    // 处理读事件
+    void S_onRead(int fd);
 private:
     int lfd;
     int epfd;

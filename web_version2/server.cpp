@@ -54,24 +54,22 @@ int Server::epollRun(){
     }
     struct epoll_event evs[1024];
     while(1){
-        // int size = sizeof(evs) / sizeof(struct epoll_event);
-        int timeout = timer.getNextTime();
+        int timeout = timer.getNextTime() * 1000;
         int num = epoll_wait(epfd, evs, 1000, timeout);
         for(int i = 0; i < num; ++i){
             int fd = evs[i].data.fd;
+            uint32_t event = evs[i].events;
             if(fd == lfd){
                 // accept
                 acceptClient();
-            }else{
+            }else if(event & (EPOLLHUP | EPOLLRDHUP | EPOLLERR)){
+                S_close(fd);
+            }else {
                 // deal read
-                // recvHttpRequest(fd, epfd);
-                clients[fd].onRead(epfd);
-                clients.erase(fd);
-                epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
-                close(fd);
+                S_onRead(fd);
             }
         }
-        // timer.tick();
+        timer.tick();
     }
     return 1;
 }
@@ -97,8 +95,12 @@ int Server::acceptClient(){
         perror("epoll_ctl");
         return -1;
     }
-    clients[cfd] = Client(cfd);
-    timer.push(Clock::now(), bind(&Server::closefd, this, cfd), epfd, cfd);
+    // 初始化Client对象
+    clients[cfd].init(epfd, cfd);
+
+    time_t curr = time(NULL);
+    timer.push(curr, bind(&Server::S_close, this, cfd), cfd);
+    
     return 0;
 }
 
@@ -113,12 +115,17 @@ void Server::run(){
     epollRun();
 }
 
-void Server::closefd(int cfd){
-    clients.erase(cfd);
-    epoll_ctl(epfd, EPOLL_CTL_DEL, cfd, NULL);
-    close(cfd);
+void Server::S_close(int cfd){
+    // 懒关闭
+    clients[cfd].C_close();
     return;
 }
+
+void Server::S_onRead(int cfd){
+    clients[cfd].onRead();
+}
+
+
 /*
 ***************************************************************************************************
 ***************************************************************************************************
@@ -128,33 +135,37 @@ void Server::closefd(int cfd){
 ***************************************************************************************************
 ***************************************************************************************************
 */
-int Client::recvHttpRequest(int epfd){
+void Client::init(int epfd_, int cfd_){
+    isClosed = false;
+    epfd = epfd_;
+    cfd = cfd_;
+    if(!rbuf.empty())
+        rbuf.clear();
+    return;
+}
+
+int Client::recvHttpRequest(){
     int len = 0;
     int total = 0;
-    // char buf[4096] = {0};
     
     char tmp[1024] = {0};
+    // 从缓冲区读取
     while((len = recv(cfd, tmp, sizeof tmp, 0)) > 0){
         rbuf += string(tmp);
-        // memcpy(buf + total, tmp, len);
-        // total += len;
     }
     printf("[%d] recv HTTP: {\n%s}\n", cfd, rbuf.c_str()); // log
-    // recv finish ? 
+    
+    // 解析输入的报文 
     if(len == -1 && errno == EAGAIN){
-        // parse request line
-        // char *pt = strstr(rbuf.c_str(), "\r\n");
-        // int reqLen = pt - rbuf.c_str();
-        // buf[reqLen] = '\0';
         int cut = rbuf.find("/r/n");
-        parseRequestLine(rbuf.substr(0, cut).c_str());
+        parse(rbuf.substr(0, cut).c_str());
 
-
-    }else if(len == 0){
-        // epoll_ctl(epfd, EPOLL_CTL_DEL, cfd, NULL);
-        // close(cfd);
-        printf("client close!\n");
-        return 0;
+    // }else if(len == 0){
+    //     // epoll_ctl(epfd, EPOLL_CTL_DEL, cfd, NULL);
+    //     // close(cfd);
+    //     // C_close(epfd);
+    //     // printf("client close!\n");
+    //     return 0;
     }else{
         perror("recv");
         return -1;
@@ -162,6 +173,12 @@ int Client::recvHttpRequest(int epfd){
     return 1;
 }
 
+int Client::parse(const char* line){
+    parseRequestLine(line);
+    // printf("after respond close fd!\n");
+    C_close();
+    return 0;
+}
 
 int Client::parseRequestLine(const char* line){
     // get /xx/1.jpg
@@ -209,10 +226,10 @@ int Client::sendFile(const char *fileName){
     printf("sendfile: %s\n", fileName);
     int fd = open(fileName, O_RDONLY);
     assert(fd > 0);
-#if 1
+#if 0
     while(true){
         char buf[1024];
-        int len = read(fd, buf, sizeof buf);
+        int len = read(fd, buf, 1000);
         if(len > 0){
             send(cfd, buf, len, 0);
             usleep(10);// 这非常重要
@@ -227,10 +244,11 @@ int Client::sendFile(const char *fileName){
     off_t offset;
     int size = lseek(fd, 0, SEEK_END);
     lseek(fd, 0, SEEK_SET);
-    while(offset < size){
-        int ret = sendfile(cfd, fd, &offset, size);
-        if(ret != -1) printf("have send %dbytes\n", ret);
-    }
+    sendfile(cfd, fd, NULL, size);
+    // while(offset < size){
+    //     int ret = sendfile(cfd, fd, &offset, size - offset);
+    //     if(ret != -1) printf("have send %dbytes\n", ret);
+    // }
 #endif
     close(fd);
     return 1;
@@ -314,8 +332,20 @@ string Client::getFileType(const char *_name){
     return fileType[dot];    
 }
 
-int Client::onRead(int epfd){
-    int ret = recvHttpRequest(epfd);
+int Client::onRead(){
+    int ret = recvHttpRequest();
+}
+
+int Client::C_close(){
+    // 懒关闭 不删除Client对象，而是将isClosed设置为true
+    if(isClosed == false){
+        epoll_ctl(epfd, EPOLL_CTL_DEL, cfd, NULL);
+        isClosed = true;
+        close(cfd);
+        rbuf.clear();
+        printf("Close!\n");
+    }
+    return 0;
 }
 
 /*
@@ -371,16 +401,15 @@ int Time_heap::upAdj(int idx){
     return 0;
 }
 
-int Time_heap::push(std::chrono::time_point<std::chrono::high_resolution_clock> t,
-    std::function<void()> func,
-    int epfd,
-    int fd){
+int Time_heap::push(time_t exp_time, std::function<void()> func, int fd){
+    test_show_arr("push working");
     int idx = timeList.size();
-    timeList.emplace_back(t, func, epfd, fd);
+    timeList.emplace_back(exp_time, func, fd);
     upAdj(idx);
 }
 
 int Time_heap::push(TimeNode tn){
+    test_show_arr("push working");
     int idx = timeList.size();
     timeList.push_back(tn);
     upAdj(idx);
@@ -388,39 +417,44 @@ int Time_heap::push(TimeNode tn){
 }
 
 int Time_heap::pop(){
-    TimeNode t = timeList[0];
+    std::function<void()> f = timeList[0].cb_func;
     int idx = timeList.size()-1;
     swp(0, idx);
     timeList.pop_back();
     dwnAdj(0);
-    t.cb_func();
+    f();
     return 0;
 }
 
 int Time_heap::getNextTime(){
     if(timeList.empty()) return -1;
-    int ret = chrono::duration_cast<MS>(Clock::now() - timeList[0].t).count();
+    time_t curr = time(NULL);
+    int ret = curr - timeList[0].expire;
+    if(ret < 0) {
+        ret = 0;
+    }
     return ret;
 }
 
 int Time_heap::tick(){
-    printf("before: tick(): ");
-    for(auto tmp : timeList){
-        printf("[%d] ", tmp.fd);
-    }
-    printf("\n");
     while(!timeList.empty()){
-        int time = chrono::duration_cast<MS>(Clock::now() - timeList[0].t).count();
+        time_t curr = time(NULL);
+        int time = curr - timeList[0].expire;
         // printf("%ld\n", time);
         if(time < timeout_ms){
             break;
         }
+        test_show_arr("tick working");
         pop();
     }
-    printf("after: tick(): ");
+    return 0;
+}
+
+void Time_heap::test_show_arr(const std::string str){
+    return;
+    printf("%s: ", str.c_str());
     for(auto tmp : timeList){
         printf("[%d] ", tmp.fd);
     }
     printf("\n");
-    return 0;
 }
